@@ -66,7 +66,190 @@ class MIPSSimulator(object):
     @staticmethod
     def __format_category3(bin_instr):
         return (int(bin_instr[8:13], 2), int(bin_instr[3:8], 2), MIPSSimulator.__bin2dec(bin_instr[16:])) 
- 
+    
+    def __format_simulation_registers(self):
+        output = "Registers\n"\
+            "R00:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
+            "R08:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
+            "R16:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
+            "R24:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n\n" % tuple(self.__registers)
+        return output
+    
+    def __format_simulation_data(self):
+        output = "Data\n"
+        addrs = range(self.__data_addr, self.__data_addr_end, self.__instr_len)
+        i = 0
+        while i < len(addrs)-1:
+            alignment = []
+            for addr in addrs[i:i+8]:
+                alignment.append(self.__data[addr])            
+            output += "%d:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % ((addrs[i],) + tuple(alignment))
+            i += 8    
+        output+="\n"
+        return output
+
+    def __format_simulation_queues(self):
+        output = "IF Unit:\n"
+        output += "\tWaiting Instruction:%s\n" % (self.__waiting_instr)
+        output += "\tExecuted Instruction:%s\n" % (self.__executed_instr)
+        output += "Pre-Issue Queue:\n"
+        output += "Pre-ALU Queue:\n"
+        output += "Pre-MEM Queue:\n"
+        output += "Post-MEM Queue:\n"
+        output += "Post-ALU Queue:\n"
+        output+="\n"
+        return output
+
+    def __format_simulation_output(self, cycle):
+        output = "--------------------\nCycle:%d\n\n" % (cycle)
+        output += self.__format_simulation_queues()
+        output += self.__format_simulation_registers()
+        output += self.__format_simulation_data()
+        return output
+    
+    __do_category2 = {
+        "ADD" : lambda rs, rt : rs + rt,
+        "SUB" : lambda rs, rt : rs - rt,
+        "MUL" : lambda rs, rt : rs * rt,
+        "AND" : lambda rs, rt : rs & rt,
+        "OR" : lambda rs, rt : rs | rt,
+        "XOR" : lambda rs, rt : rs ^ rt,
+        "NOR" : lambda rs, rt : ~(rs | rt)
+    }
+    
+    __do_category3 = {
+        "ADDI" : lambda rs, immed: rs + immed,
+        "ANDI" : lambda rs, immed: rs & immed,
+        "ORI" : lambda rs, immed: rs | immed,
+        "XORI" : lambda rs, immed: rs ^ immed
+    }
+    
+    def __do_branch(self, instr_comp):
+        res = True
+        self.__is_stalled = False
+        if instr_comp[0] == "J":
+            self.__pc = int(instr_comp[1].replace("#", ""))
+        elif instr_comp[0] == "BEQ":
+            rsi = int(instr_comp[1].replace("R", ""))
+            rti = int(instr_comp[2].replace("R", ""))
+            if self.__locks[rsi] == 1 or self.__locks[rti] == 1:
+                self.__is_stalled = True
+                res = False
+            elif self.__registers[rsi] == self.__registers[rti]:
+                self.__pc += int(instr_comp[3].replace("#", ""))
+        elif instr_comp[0] == "BGTZ":
+            rsi = int(instr_comp[1].replace("R", ""))
+            if self.__locks[rsi] == 1:
+                self.__is_stalled = True
+                res = False
+            elif self.__registers[rsi] > 0:
+                self.__pc += int(instr_comp[2].replace("#", ""))
+        return res
+    
+    def __do_alu(self, instr_comp):
+        regs = None
+        res = None
+        if instr_comp[0] in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
+            rdi = int(instr_comp[1].replace("R", ""))
+            rsi = int(instr_comp[2].replace("R", ""))
+            rti = int(instr_comp[3].replace("R", ""))
+            regs = (rdi, rsi, rti)
+            res = MIPSSimulator.__do_category2[instr_comp[0]](self.__registers[rsi], self.__registers[rti])
+        elif instr_comp[0] in ("ADDI", "ANDI", "ORI", "XORI"):
+            rti = int(instr_comp[1].replace("R", ""))
+            rsi = int(instr_comp[2].replace("R", ""))
+            immed = int(instr_comp[3].replace("#", ""))
+            regs = (rti, rsi)
+            res = MIPSSimulator.__do_category3[instr_comp[0]](self.__registers[rsi], immed)
+        return regs, res
+
+    def __do_mem(self, instr_comp):
+        reg = None
+        res = None
+        if instr_comp[0] in ("SW", "LW"):
+            rti = int(instr_comp[1].replace("R", ""))
+            [offset, base] = instr_comp[2].split("(")
+            offset = int(offset)
+            base = self.__registers[int(base.replace("R", "").replace(")", ""))]
+            if instr_comp[0] == "SW":
+                self.__data[base+offset] = self.__registers[rti]
+            elif instr_comp[0] == "LW":
+                reg = rti
+                res = self.__data[base+offset]
+        return reg, res
+
+    def __can_issue(self, instr):
+        return True
+
+    def __IF(self):
+        out = []
+        self.__executed_instr = ""
+        if self.__is_stalled:
+            instr_comp = self.__waiting_instr.replace(",", "").split(" ")
+            if self.__do_branch(instr_comp):
+                self.__executed_instr = self.__waiting_instr
+                self.__waiting_instr = ""
+        else:
+            fetch_count = 2
+            while not self.__is_break and fetch_count > 0 and len(self.__pre_issue) < 4:
+                instr = self.__assembly_code[self.__pc]
+                self.__pc += self.__instr_len    
+                instr_comp = instr.replace(",", "").split(" ")
+                if instr_comp[0] == "BREAK":
+                    self.__is_break = True
+                elif instr_comp[0] in ("J", "BEQ", "BGTZ"):
+                    if self.__do_branch(instr_comp):
+                        self.__executed_instr = instr
+                    else:
+                        self.__waiting_instr = instr
+                    break
+                else:
+                    out.append(instr)                     
+                    fetch_count -= 1
+        return out
+    
+    def __issue(self):
+        out = []
+        has_issued = 0
+        for instr in self.__pre_issue:
+            if len(self.__pre_alu)+has_issued == 2:
+                break
+            if self.__can_issue(instr):
+                out.append(instr)
+                has_issued += 1        
+        return out
+    
+    def __alu(self):
+        pre_mem_out = []
+        post_alu_out = []
+        if len(self.__pre_alu) > 0:
+            instr = self.__pre_alu.pop(0)
+            instr_comp = instr.replace(",", "").split(" ")
+            if instr_comp[0] in ("SW", "LW"):      
+                pre_mem_out.append(instr)
+            else:
+                regs, res = self.__do_alu(instr_comp)
+                post_alu_out.append((instr, regs, res))
+        return post_alu_out, pre_mem_out
+    
+    def __mem(self):
+        out = []
+        if len(self.__pre_mem) == 1:
+            instr = self.__pre_mem.pop(0)
+            instr_comp = instr.replace(",", "").split(" ")
+            reg, res = self.__do_mem(instr_comp)
+            if reg != None and res != None:
+                out.append((instr, reg, res))
+        return out
+    
+    def __wb(self):
+        if len(self.__post_alu) == 1:
+            buff = self.__post_alu.pop(0)
+            self.__registers[buff[1][0]] = buff[2]
+        if len(self.__post_mem) == 1:
+            buff = self.__post_mem.pop(0)
+            self.__registers[buff[1]] = buff[2]
+    
     def disassemble(self, binary_path):
         try:
             binary_file = open(binary_path, "r")
@@ -101,167 +284,6 @@ class MIPSSimulator(object):
         self.__data_addr_end = addr
         return disassembly
     
-    def write2file(self, output, file_path):
-        try:
-            f = open(file_path, "w")
-        except:
-            print "[!!!] Can't not open file."
-            sys.exit(1)          
-        try:
-            f.write(output)
-        except:
-            print "[!!!] Can't not write file."
-            sys.exit(1)
-        finally:
-            f.close()
-    
-    def __format_simulation_registers(self):
-        output = "Registers\n"\
-            "R00:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
-            "R08:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
-            "R16:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n"\
-            "R24:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n\n" % tuple(self.__registers)
-        return output
-    
-    def __format_simulation_data(self):
-        output = "Data\n"
-        addrs = range(self.__data_addr, self.__data_addr_end, self.__instr_len)
-        i = 0
-        while i < len(addrs)-1:
-            alignment = []
-            for addr in addrs[i:i+8]:
-                alignment.append(self.__data[addr])            
-            output += "%d:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n" % ((addrs[i],) + tuple(alignment))
-            i += 8    
-        output+="\n"
-        return output
-
-    def __format_simulation_queues(self):
-        output = "IF Unit:\n"
-        output += "Pre-Issue Queue:\n"
-        output += "Pre-ALU Queue:\n"
-        output += "Pre-MEM Queue:\n"
-        output += "Post-MEM Queue:\n"
-        output += "Post-ALU Queue:\n"
-        output+="\n"
-        return output
-
-    def __format_simulation_output(self, cycle):
-        output = "--------------------\nCycle:%d\n\n" % (cycle)
-        output += self.__format_simulation_queues()
-        output += self.__format_simulation_registers()
-        output += self.__format_simulation_data()
-        return output
-    
-    __do_category2 = {
-        "ADD" : lambda rs, rt : rs + rt,
-        "SUB" : lambda rs, rt : rs - rt,
-        "MUL" : lambda rs, rt : rs * rt,
-        "AND" : lambda rs, rt : rs & rt,
-        "OR" : lambda rs, rt : rs | rt,
-        "XOR" : lambda rs, rt : rs ^ rt,
-        "NOR" : lambda rs, rt : ~(rs | rt)
-    }
-    
-    __do_category3 = {
-        "ADDI" : lambda rs, immed: rs + immed,
-        "ANDI" : lambda rs, immed: rs & immed,
-        "ORI" : lambda rs, immed: rs | immed,
-        "XORI" : lambda rs, immed: rs ^ immed
-    }
-    
-    def __do_instruction(self, instr, pc):
-        is_break = False
-        pc += self.__instr_len
-        l = instr.replace(",", "").split(" ")
-        if l[0] in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
-            rdi = int(l[1].replace("R", ""))
-            rsi = int(l[2].replace("R", ""))
-            rti = int(l[3].replace("R", ""))
-            self.__registers[rdi] = MIPSSimulator.__do_category2[l[0]](self.__registers[rsi], self.__registers[rti])
-        elif l[0] in ("ADDI", "ANDI", "ORI", "XORI"):
-            rti = int(l[1].replace("R", ""))
-            rsi = int(l[2].replace("R", ""))
-            immed = int(l[3].replace("#", ""))
-            self.__registers[rti] = MIPSSimulator.__do_category3[l[0]](self.__registers[rsi], immed)
-        elif l[0] == "J":
-            pc = int(l[1].replace("#", ""))
-        elif l[0] == "BEQ":
-            rsi = int(l[1].replace("R", ""))
-            rti = int(l[2].replace("R", ""))
-            if self.__registers[rsi] == self.__registers[rti]:
-                pc += int(l[3].replace("#", ""))
-        elif l[0] == "BGTZ":
-            rsi = int(l[1].replace("R", ""))
-            if self.__registers[rsi] > 0:
-                pc += int(l[2].replace("#", ""))
-        elif l[0] in ("SW", "LW"):
-            rti = int(l[1].replace("R", ""))
-            [offset, base] = l[2].split("(")
-            offset = int(offset)
-            base = self.__registers[int(base.replace("R", "").replace(")", ""))]
-            if l[0] == "SW":
-                self.__data[base+offset] = self.__registers[rti]
-            elif l[0] == "LW":
-                self.__registers[rti] = self.__data[base+offset]      
-        elif l[0] == "BREAK":
-            is_break = True
-        return is_break, pc
-    
-    def __do_branch(self, instr):
-        l = instr.replace(",", "").split(" ")
-        res = True
-        self.__is_stalled = False
-        if l[0] == "J":
-            self.__pc = int(l[1].replace("#", ""))
-        elif l[0] == "BEQ":
-            rsi = int(l[1].replace("R", ""))
-            rti = int(l[2].replace("R", ""))
-            if self.__locks[rsi] == 1 or self.__locks[rti] == 1:
-                self.__is_stalled = True
-                res = False
-            elif self.__registers[rsi] == self.__registers[rti]:
-                self.__pc += int(l[3].replace("#", ""))
-        elif l[0] == "BGTZ":
-            rsi = int(l[1].replace("R", ""))
-            if self.__locks[rsi] == 1:
-                self.__is_stalled = True
-                res = False
-            elif self.__registers[rsi] > 0:
-                self.__pc += int(l[2].replace("#", ""))
-        return res
-    
-    def __is_branch(self, instr):
-        res = False
-        l = instr.replace(",", "").split(" ")
-        if l[0] == "BREAK":
-            self.__is_break = True
-        elif l[0] in ("J", "BEQ", "BGTZ"):
-            res = True
-        return res
-        
-    def __IF(self):
-        if self.__is_stalled:
-            if self.__do_branch(self.__waiting_instr):
-                self.__executed_instr = self.__waiting_instr
-                self.__waiting_instr = ""
-        else:
-            fetch_count = 2
-            while fetch_count > 0 and len(self.__pre_issue) < 4 and not self.__is_break:
-                instr = self.__assembly_code[self.__pc]
-                self.__pc += self.__instr_len
-                if self.__is_branch(instr):
-                    if self.__do_branch(instr):
-                        self.__executed_instr = instr
-                    else:
-                        self.__waiting_instr = instr
-                    break
-                else:
-                    if not self.__is_break:
-                        self.__pre_issue.append(instr)
-                        
-                    fetch_count -= 1   
-        
     def simulate(self, binary_path):
         self.disassemble(binary_path)
         self.__pc = self.__begin_addr
@@ -290,12 +312,32 @@ class MIPSSimulator(object):
         self.__is_stalled = False
         while True:
             instr = self.__assembly_code[self.__pc]
-            self.__is_break, self.__pc = self.__do_instruction(instr, self.__pc)
+            self.__pre_issue.extend(self.__IF())
+            self.__pre_alu.extend(self.__issue())
+            post_alu_out, pre_mem_out = self.__alu()
+            self.__post_alu.extend(post_alu_out)
+            self.__pre_mem.extend(pre_mem_out)
+            self.__post_mem.extend(self.__mem())
+            self.__wb()
             simulation += self.__format_simulation_output(cycle)
             cycle += 1
             if self.__is_break:
                 break
         return simulation
+    
+    def write2file(self, output, file_path):
+        try:
+            f = open(file_path, "w")
+        except:
+            print "[!!!] Can't not open file."
+            sys.exit(1)          
+        try:
+            f.write(output)
+        except:
+            print "[!!!] Can't not write file."
+            sys.exit(1)
+        finally:
+            f.close()    
 
 def usage():
     print "Usage: "
