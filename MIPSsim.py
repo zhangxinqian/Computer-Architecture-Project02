@@ -46,6 +46,20 @@ class MIPSSimulator(object):
         "111" : lambda bin_instr: MIPSSimulator.__category3[bin_instr[13:16]](bin_instr)
     }
 
+    __calulator = {
+        "ADD" : lambda rs, rt : rs + rt,
+        "SUB" : lambda rs, rt : rs - rt,
+        "MUL" : lambda rs, rt : rs * rt,
+        "AND" : lambda rs, rt : rs & rt,
+        "OR" : lambda rs, rt : rs | rt,
+        "XOR" : lambda rs, rt : rs ^ rt,
+        "NOR" : lambda rs, rt : ~(rs | rt),
+        "ADDI" : lambda rs, immed: rs + immed,
+        "ANDI" : lambda rs, immed: rs & immed,
+        "ORI" : lambda rs, immed: rs | immed,
+        "XORI" : lambda rs, immed: rs ^ immed
+    }
+
     @staticmethod
     def __bin2dec(binary):
         if binary[0] == "0":
@@ -106,87 +120,57 @@ class MIPSSimulator(object):
         output += self.__format_simulation_registers()
         output += self.__format_simulation_data()
         return output
-    
-    __do_category2 = {
-        "ADD" : lambda rs, rt : rs + rt,
-        "SUB" : lambda rs, rt : rs - rt,
-        "MUL" : lambda rs, rt : rs * rt,
-        "AND" : lambda rs, rt : rs & rt,
-        "OR" : lambda rs, rt : rs | rt,
-        "XOR" : lambda rs, rt : rs ^ rt,
-        "NOR" : lambda rs, rt : ~(rs | rt)
-    }
-    
-    __do_category3 = {
-        "ADDI" : lambda rs, immed: rs + immed,
-        "ANDI" : lambda rs, immed: rs & immed,
-        "ORI" : lambda rs, immed: rs | immed,
-        "XORI" : lambda rs, immed: rs ^ immed
-    }
-    
-    def __do_branch(self, instr_comp):
+
+    def __get_opes(self, instr):
+        instr_comp = instr.replace(",", "").split(" ")
+        opes = [instr_comp[0]]
+        if opes[0] in ("SW", "LW"):
+            rti = int(instr_comp[1].replace("R", ""))
+            [offset, base_reg] = instr_comp[2].split("(")
+            offset = int(offset)
+            base_reg = int(base.replace("R", "").replace(")", ""))
+            opes.extend([rti, offset, base_reg])
+        else:
+            for i in instr_comp[1:]:
+                opes.append(int(i.lstrip('R#')))
+        return opes
+
+    def __do_branch(self, opes):
         res = True
         self.__is_stalled = False
-        if instr_comp[0] == "J":
-            self.__pc = int(instr_comp[1].replace("#", ""))
-        elif instr_comp[0] == "BEQ":
-            rsi = int(instr_comp[1].replace("R", ""))
-            rti = int(instr_comp[2].replace("R", ""))
-            if self.__locks[rsi] == 1 or self.__locks[rti] == 1:
+        if opes[0] == "J":
+            self.__pc = opes[1]
+        elif opes[0] == "BEQ":
+            rsi = opes[1]
+            rti = opes[2]
+            if not self.__branch_reg_ready[rsi] or not self.__branch_reg_ready[rti]:
                 self.__is_stalled = True
                 res = False
             elif self.__registers[rsi] == self.__registers[rti]:
-                self.__pc += int(instr_comp[3].replace("#", ""))
-        elif instr_comp[0] == "BGTZ":
-            rsi = int(instr_comp[1].replace("R", ""))
-            if self.__locks[rsi] == 1:
+                self.__pc += opes[3]
+        elif opes[0] == "BGTZ":
+            rsi = opes[1]
+            if not self.__branch_reg_ready[rsi]:
                 self.__is_stalled = True
                 res = False
             elif self.__registers[rsi] > 0:
-                self.__pc += int(instr_comp[2].replace("#", ""))
+                self.__pc += opes[2]
         return res
-    
-    def __do_alu(self, instr_comp):
-        regs = None
-        res = None
-        if instr_comp[0] in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
-            rdi = int(instr_comp[1].replace("R", ""))
-            rsi = int(instr_comp[2].replace("R", ""))
-            rti = int(instr_comp[3].replace("R", ""))
-            regs = (rdi, rsi, rti)
-            res = MIPSSimulator.__do_category2[instr_comp[0]](self.__registers[rsi], self.__registers[rti])
-        elif instr_comp[0] in ("ADDI", "ANDI", "ORI", "XORI"):
-            rti = int(instr_comp[1].replace("R", ""))
-            rsi = int(instr_comp[2].replace("R", ""))
-            immed = int(instr_comp[3].replace("#", ""))
-            regs = (rti, rsi)
-            res = MIPSSimulator.__do_category3[instr_comp[0]](self.__registers[rsi], immed)
-        return regs, res
 
-    def __do_mem(self, instr_comp):
-        reg = None
-        res = None
-        if instr_comp[0] in ("SW", "LW"):
-            rti = int(instr_comp[1].replace("R", ""))
-            [offset, base] = instr_comp[2].split("(")
-            offset = int(offset)
-            base = self.__registers[int(base.replace("R", "").replace(")", ""))]
-            if instr_comp[0] == "SW":
-                self.__data[base+offset] = self.__registers[rti]
-            elif instr_comp[0] == "LW":
-                reg = rti
-                res = self.__data[base+offset]
-        return reg, res
-
-    def __can_issue(self, instr):
+    def __can_issue(self, opes):
+        op = opes[0]
+        o1 = opes[1]
+        o2 = opes[2]
+        o3 = opes[3]
+        
         return True
 
     def __IF(self):
         out = []
         self.__executed_instr = ""
         if self.__is_stalled:
-            instr_comp = self.__waiting_instr.replace(",", "").split(" ")
-            if self.__do_branch(instr_comp):
+            opes = self.__get_opes(self.__waiting_instr)
+            if self.__do_branch(opes):
                 self.__executed_instr = self.__waiting_instr
                 self.__waiting_instr = ""
         else:
@@ -194,28 +178,44 @@ class MIPSSimulator(object):
             while not self.__is_break and fetch_count > 0 and len(self.__pre_issue) < 4:
                 instr = self.__assembly_code[self.__pc]
                 self.__pc += self.__instr_len    
-                instr_comp = instr.replace(",", "").split(" ")
-                if instr_comp[0] == "BREAK":
+                opes = self.__get_opes(instr)
+                if opes[0] == "BREAK":
                     self.__is_break = True
-                elif instr_comp[0] in ("J", "BEQ", "BGTZ"):
-                    if self.__do_branch(instr_comp):
+                elif opes[0] in ("J", "BEQ", "BGTZ"):
+                    if self.__do_branch(opes):
                         self.__executed_instr = instr
                     else:
                         self.__waiting_instr = instr
                     break
                 else:
-                    out.append(instr)                     
+                    out.append((instr, opes))
+                    if opes[0] != "SW":
+                        self.__branch_reg_ready[opes[1]] = False
                     fetch_count -= 1
-        return out
+        return out 
     
     def __issue(self):
         out = []
         has_issued = 0
-        for instr in self.__pre_issue:
+        for temp in self.__pre_issue:
             if len(self.__pre_alu)+has_issued == 2:
                 break
-            if self.__can_issue(instr):
-                out.append(instr)
+            if self.__can_issue(temp[1]):
+                instr = temp[0]
+                operator = temp[1][0]
+                operand1 = temp[1][1]
+                operand2 = temp[1][2]
+                operand3 = temp[1][3]                
+                if operator == "SW":
+                    operand1 = self.__registers[temp[1][1]]
+                    operand2 = self.__registers[temp[1][2]]
+                    operand3 = self.__registers[temp[1][3]]
+                elif operator in ("LW", "ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
+                    operand2 = self.__registers[temp[1][2]]
+                    operand3 = self.__registers[temp[1][3]]
+                elif operator in ("ADDI", "ANDI", "ORI", "XORI"):
+                    operand2 = self.__registers[temp[1][2]]           
+                out.append((instr, (operator, operand1, operand2, operand3)))
                 has_issued += 1        
         return out
     
@@ -223,32 +223,35 @@ class MIPSSimulator(object):
         pre_mem_out = []
         post_alu_out = []
         if len(self.__pre_alu) > 0:
-            instr = self.__pre_alu.pop(0)
-            instr_comp = instr.replace(",", "").split(" ")
-            if instr_comp[0] in ("SW", "LW"):      
-                pre_mem_out.append(instr)
+            temp = self.__pre_alu.pop(0)
+            instr = temp[0]            
+            if temp[1][0] in ("SW", "LW"):
+                res = temp[1][2] + temp[1][3]
+                pre_mem_out.append((instr, (temp[1][0], temp[1][1], res)))
             else:
-                regs, res = self.__do_alu(instr_comp)
-                post_alu_out.append((instr, regs, res))
+                res = MIPSSimulator.__calulator[temp[1][0]](temp[1][2], temp[1][3])
+                post_alu_out.append((instr, (temp[1][1], res)))
         return post_alu_out, pre_mem_out
     
     def __mem(self):
         out = []
         if len(self.__pre_mem) == 1:
-            instr = self.__pre_mem.pop(0)
-            instr_comp = instr.replace(",", "").split(" ")
-            reg, res = self.__do_mem(instr_comp)
-            if reg != None and res != None:
-                out.append((instr, reg, res))
+            temp = self.__pre_mem.pop(0)      
+            if temp[1][0] == "SW":
+                self.__data[temp[1][2]] = temp[1][1]
+            elif temp[1][0] == "LW":
+                out.append((temp[0], (temp[1][1], self.__data[temp[1][2]])))
         return out
     
     def __wb(self):
         if len(self.__post_alu) == 1:
-            buff = self.__post_alu.pop(0)
-            self.__registers[buff[1][0]] = buff[2]
+            temp = self.__post_alu.pop(0)
+            self.__registers[temp[1][0]] = temp[1][1]
+            self.__branch_reg_ready[temp[1][0]] = True
         if len(self.__post_mem) == 1:
-            buff = self.__post_mem.pop(0)
-            self.__registers[buff[1]] = buff[2]
+            temp = self.__post_mem.pop(0)
+            self.__registers[temp[1][0]] = temp[1][1]
+            self.__branch_reg_ready[temp[1][0]] = True
     
     def disassemble(self, binary_path):
         try:
@@ -294,11 +297,23 @@ class MIPSSimulator(object):
             0, 0, 0, 0, 0, 0, 0, 0, 
             0, 0, 0, 0, 0, 0, 0, 0
         ]
-        self.__locks = [
-            0, 0, 0, 0, 0, 0, 0, 0, 
-            0, 0, 0, 0, 0, 0, 0, 0, 
-            0, 0, 0, 0, 0, 0, 0, 0, 
-            0, 0, 0, 0, 0, 0, 0, 0
+        self.__branch_reg_ready = [
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True
+        ]
+        self.__reg_r = [
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True            
+        ]
+        self.__reg_w = [
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True, 
+            True, True, True, True, True, True, True, True            
         ]
         self.__waiting_instr = ""
         self.__executed_instr = ""
