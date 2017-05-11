@@ -104,14 +104,38 @@ class MIPSSimulator(object):
 
     def __format_simulation_queues(self):
         output = "IF Unit:\n"
-        output += "\tWaiting Instruction:%s\n" % (self.__waiting_instr)
-        output += "\tExecuted Instruction:%s\n" % (self.__executed_instr)
+        instr = self.__waiting_instr
+        if instr != "":
+            instr = "[%s]" % instr
+        output += "\tWaiting Instruction:%s\n" % instr
+        instr = self.__executed_instr
+        if instr != "":
+            instr = "[%s]" % instr
+        output += "\tExecuted Instruction:%s\n" % instr
         output += "Pre-Issue Queue:\n"
+        for i in [0, 1, 2, 3]:
+            instr = ""
+            if i < len(self.__pre_issue):
+                instr = "[%s]" % self.__pre_issue[i][0]
+            output += "\tEntry %d:%s\n" % (i, instr)
         output += "Pre-ALU Queue:\n"
-        output += "Pre-MEM Queue:\n"
-        output += "Post-MEM Queue:\n"
-        output += "Post-ALU Queue:\n"
-        output+="\n"
+        for i in [0, 1]:
+            instr = ""
+            if i < len(self.__pre_alu):
+                instr = "[%s]" % self.__pre_alu[i][0]
+            output += "\tEntry %d:%s\n" % (i, instr)
+        instr = ""
+        if len(self.__pre_mem) > 0:
+            instr = "[%s]" % self.__pre_mem[0][0]
+        output += "Pre-MEM Queue:%s\n" % instr
+        instr = ""
+        if len(self.__post_mem) > 0:
+            instr = "[%s]" % self.__post_mem[0][0]
+        output += "Post-MEM Queue:%s\n" % instr
+        instr = ""
+        if len(self.__post_alu) > 0:
+            instr = "[%s]" % self.__post_alu[0][0]
+        output += "Post-ALU Queue:%s\n\n" % instr
         return output
 
     def __format_simulation_output(self, cycle):
@@ -157,13 +181,37 @@ class MIPSSimulator(object):
                 self.__pc += opes[2]
         return res
 
-    def __can_issue(self, opes):
+    def __issuable(self, opes):
         op = opes[0]
         o1 = opes[1]
         o2 = opes[2]
         o3 = opes[3]
-        
-        return True
+        issuable = False
+        current_store_f = self.__store_f
+        if op in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):                  
+            if self.__reg_w[o2] and self.__reg_w[o3] and self.__reg_r[o1] and self.__reg_w[o1]:
+                issuable = True
+            self.__reg_r[o2] = False
+            self.__reg_r[o3] = False
+            self.__reg_w[o1] = False
+        elif op in ("ADDI", "ANDI", "ORI", "XORI"):
+            if self.__reg_w[o2] and self.__reg_r[o1] and self.__reg_w[o1]:
+                issuable = True
+            self.__reg_r[o2] = False
+            self.__reg_w[o1] = False
+        elif op == "SW":
+            if self.__reg_w[o3] and self.__reg_w[o1] and self.__store_f:
+                issuable = True
+            else:
+                current_store_f = False
+            self.__reg_r[o3] = False
+            self.__reg_r[o1] = False
+        elif op == "LW":
+            if self.__reg_w[o3] and self.__reg_r[o1] and self.__reg_w[o1] and self.__store_f:
+                issuable = True
+            self.__reg_r[o3] = False
+            self.__reg_w[o1] = False
+        return issuable, current_store_f
 
     def __IF(self):
         out = []
@@ -177,7 +225,7 @@ class MIPSSimulator(object):
             fetch_count = 2
             while not self.__is_break and fetch_count > 0 and len(self.__pre_issue) < 4:
                 instr = self.__assembly_code[self.__pc]
-                self.__pc += self.__instr_len    
+                self.__pc += self.__instr_len
                 opes = self.__get_opes(instr)
                 if opes[0] == "BREAK":
                     self.__is_break = True
@@ -192,15 +240,18 @@ class MIPSSimulator(object):
                     if opes[0] != "SW":
                         self.__branch_reg_ready[opes[1]] = False
                     fetch_count -= 1
-        return out 
+        return out
     
     def __issue(self):
         out = []
         has_issued = 0
+        self.__store_f = True
         for temp in self.__pre_issue:
             if len(self.__pre_alu)+has_issued == 2:
                 break
-            if self.__can_issue(temp[1]):
+            issuable, cur_store_f = self.__issuable(temp[1])
+            self.__store_f = cur_store_f and self.__store_f
+            if issuable:
                 instr = temp[0]
                 operator = temp[1][0]
                 operand1 = temp[1][1]
@@ -208,15 +259,22 @@ class MIPSSimulator(object):
                 operand3 = temp[1][3]                
                 if operator == "SW":
                     operand1 = self.__registers[temp[1][1]]
-                    operand2 = self.__registers[temp[1][2]]
+                    self.__reg_r[temp[1][1]] = True
                     operand3 = self.__registers[temp[1][3]]
-                elif operator in ("LW", "ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
-                    operand2 = self.__registers[temp[1][2]]
+                    self.__reg_r[temp[1][3]] = True
+                elif operator == "LW":
                     operand3 = self.__registers[temp[1][3]]
+                    self.__reg_r[temp[1][3]] = True
+                elif operator in ("ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR"):
+                    operand2 = self.__registers[temp[1][2]]
+                    self.__reg_r[temp[1][2]] = True
+                    operand3 = self.__registers[temp[1][3]]
+                    self.__reg_r[temp[1][3]] = True
                 elif operator in ("ADDI", "ANDI", "ORI", "XORI"):
-                    operand2 = self.__registers[temp[1][2]]           
+                    operand2 = self.__registers[temp[1][2]]
+                    self.__reg_r[temp[1][2]] = True
                 out.append((instr, (operator, operand1, operand2, operand3)))
-                has_issued += 1        
+                has_issued += 1
         return out
     
     def __alu(self):
@@ -248,10 +306,12 @@ class MIPSSimulator(object):
             temp = self.__post_alu.pop(0)
             self.__registers[temp[1][0]] = temp[1][1]
             self.__branch_reg_ready[temp[1][0]] = True
+            self.__reg_w[temp[1][0]] = True
         if len(self.__post_mem) == 1:
             temp = self.__post_mem.pop(0)
             self.__registers[temp[1][0]] = temp[1][1]
             self.__branch_reg_ready[temp[1][0]] = True
+            self.__reg_w[temp[1][0]] = True
     
     def disassemble(self, binary_path):
         try:
@@ -314,7 +374,7 @@ class MIPSSimulator(object):
             True, True, True, True, True, True, True, True, 
             True, True, True, True, True, True, True, True, 
             True, True, True, True, True, True, True, True            
-        ]
+        ]  
         self.__waiting_instr = ""
         self.__executed_instr = ""
         self.__pre_issue = []

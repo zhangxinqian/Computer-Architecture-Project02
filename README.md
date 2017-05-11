@@ -1,5 +1,7 @@
 # Computer-Architecture-Project02
 
+A MIPS simulator for a pipeline processor with basic Scoreboard algorithm 
+
 Python env: 2.7
 
 Usage:
